@@ -796,16 +796,21 @@
             throw new Error(ERROR_MESSAGES.TEXTAREA_NOT_FOUND);
         }
         
-        // Use the improved paste method with success verification
-        const success = await pasteInTwitterInput(finalText, textarea);
+        let success = await typeReplyWithHumanEffect(textarea, finalText);
+        
+        if (!success) {
+            // Use the improved paste method with success verification as secondary approach
+            success = await pasteInTwitterInput(finalText, textarea);
+        }
         
         if (!success) {
             // Try alternative insertion method as final fallback
-            console.log('[X Auto Reply] Primary insertion failed, trying alternative method...');
+            console.log('[X Auto Reply] Primary methods failed, trying alternative method...');
             const alternativeSuccess = await insertReplyWithTyping(replyText);
             if (!alternativeSuccess) {
                 throw new Error('All text insertion methods failed. Please try again.');
             }
+            return true;
         }
         
         // Show control buttons after successful text insertion
@@ -1108,7 +1113,7 @@
     }
     
     // Insert reply with direct pasting - simplified and fast
-    async function insertReplyWithTyping(replyText) {
+async function insertReplyWithTyping(replyText) {
         if (!replyText || typeof replyText !== 'string') {
             throw new Error('Invalid reply text');
         }
@@ -1127,7 +1132,9 @@
         
         // Focus and prepare textarea
         textarea.focus();
-        textarea.click();
+        if (typeof textarea.click === 'function') {
+            textarea.click();
+        }
         await sleep(300);
         
         // Use improved text insertion method and return success status
@@ -1138,11 +1145,48 @@
             showControlButtons();
         }
         
-        return success;
+    return success;
+}
+
+async function typeReplyWithHumanEffect(textarea, finalText) {
+    try {
+        const typingProfile = getTypingSpeed();
+        await clearTextareaCompletely(textarea);
+        textarea.focus();
+        textarea.click();
+        await sleep(200);
+        
+        let currentText = '';
+        for (const char of finalText) {
+            currentText += char;
+            textarea.textContent = currentText;
+            if ('innerText' in textarea) {
+                textarea.innerText = currentText;
+            }
+            
+            const inputEvent = new InputEvent('input', {
+                inputType: 'insertText',
+                data: char,
+                bubbles: true,
+                cancelable: true
+            });
+            textarea.dispatchEvent(inputEvent);
+            
+            const delay = typingProfile.base + Math.random() * typingProfile.variance;
+            await sleep(delay);
+        }
+        
+        await triggerTwitterEvents(textarea, currentText);
+        const verified = await verifyTextInsertion(textarea, currentText);
+        return verified;
+    } catch (error) {
+        console.error('[X Auto Reply] Human typing simulation failed:', error);
+        return false;
     }
-    
-    // Modern text insertion without deprecated APIs
-    async function directTextInsertion(textarea, finalText) {
+}
+
+// Modern text insertion without deprecated APIs
+async function directTextInsertion(textarea, finalText) {
         try {
             // Clear existing content first
             await clearTextareaCompletely(textarea);
