@@ -66,7 +66,8 @@
         <!-- Default Text -->
         <div class="form-group">
           <label for="defaultText">Default Text (Optional)</label>
-          <textarea id="defaultText" placeholder="Enter default text to include in replies..." rows="3"></textarea>
+          <textarea id="defaultText" maxlength="280" placeholder="Enter default text to include in replies..." rows="3"></textarea>
+          <div id="defaultTextCounter" class="help-text">0/280 characters</div>
           <div class="help-text">This text will be included in every generated reply</div>
         </div>
 

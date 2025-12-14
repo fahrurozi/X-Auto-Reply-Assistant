@@ -9,6 +9,8 @@
  * For licensing inquiries, contact: hexQuant@gmail.com
  */
 
+const TWITTER_CHAR_LIMIT = 280;
+
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
@@ -84,6 +86,12 @@ async function loadSettings() {
       delayRange: '3-8',
       typingSpeed: 'normal'
     };
+    let settingsUpdated = false;
+    
+    if ((settings.defaultText || '').length > TWITTER_CHAR_LIMIT) {
+      settings.defaultText = sanitizeDefaultText(settings.defaultText);
+      settingsUpdated = true;
+    }
     
     console.log('🔄 [POPUP] Final settings to use:', {
       provider: settings.provider,
@@ -111,6 +119,10 @@ async function loadSettings() {
     
     // Populate UI with settings
     populateUIWithSettings(settings);
+    
+    if (settingsUpdated) {
+      await chrome.storage.local.set({ settings });
+    }
   } catch (error) {
     console.error('❌ [POPUP] Error loading settings:', error);
     showStatus('Failed to load settings', 'error');
@@ -122,7 +134,12 @@ function populateUIWithSettings(settings) {
   // Populate form fields
   document.getElementById('minWords').value = settings.minWords;
   document.getElementById('maxWords').value = settings.maxWords;
-  document.getElementById('defaultText').value = settings.defaultText;
+  const sanitizedDefaultText = sanitizeDefaultText(settings.defaultText || '');
+  if ((settings.defaultText || '').length > sanitizedDefaultText.length) {
+    console.warn('[POPUP] Default text exceeded character limit and was truncated');
+    settings.defaultText = sanitizedDefaultText;
+  }
+  document.getElementById('defaultText').value = sanitizedDefaultText;
   document.getElementById('includeEmoji').checked = settings.includeEmoji;
   
   // Set tone radio button
@@ -162,6 +179,7 @@ function populateUIWithSettings(settings) {
   updateCustomModelVisibility();
   
   updateRangePreview();
+  updateDefaultTextCounter();
 }
 
 // Setup event listeners
@@ -180,6 +198,7 @@ function setupEventListeners() {
   // Update range preview
   document.getElementById('minWords').addEventListener('input', updateRangePreview);
   document.getElementById('maxWords').addEventListener('input', updateRangePreview);
+  document.getElementById('defaultText').addEventListener('input', handleDefaultTextInput);
   
   // Provider dropdown change
   document.getElementById('provider').addEventListener('change', async (e) => {
@@ -503,7 +522,11 @@ async function saveGenerateSettings() {
     // Update only generate tab fields
     settings.minWords = minWords;
     settings.maxWords = maxWords;
-    settings.defaultText = document.getElementById('defaultText').value.trim();
+    const defaultTextValue = document.getElementById('defaultText').value.trim();
+    if (defaultTextValue.length > TWITTER_CHAR_LIMIT) {
+      throw new Error(`Default text must be ${TWITTER_CHAR_LIMIT} characters or less`);
+    }
+    settings.defaultText = defaultTextValue;
     settings.includeEmoji = document.getElementById('includeEmoji').checked;
     
     // Get selected tone
@@ -743,6 +766,29 @@ function updateRangePreview() {
   const min = document.getElementById('minWords').value;
   const max = document.getElementById('maxWords').value;
   document.getElementById('rangePreview').textContent = `${min}-${max} words`;
+}
+
+function handleDefaultTextInput() {
+  const defaultTextEl = document.getElementById('defaultText');
+  if (!defaultTextEl) return;
+  if (defaultTextEl.value.length > TWITTER_CHAR_LIMIT) {
+    defaultTextEl.value = defaultTextEl.value.slice(0, TWITTER_CHAR_LIMIT);
+  }
+  updateDefaultTextCounter();
+}
+
+function updateDefaultTextCounter() {
+  const defaultTextEl = document.getElementById('defaultText');
+  const counterEl = document.getElementById('defaultTextCounter');
+  if (!defaultTextEl || !counterEl) return;
+  const length = defaultTextEl.value.length;
+  counterEl.textContent = `${length}/${TWITTER_CHAR_LIMIT} characters`;
+  counterEl.classList.toggle('error', length > TWITTER_CHAR_LIMIT);
+}
+
+function sanitizeDefaultText(value) {
+  if (!value) return '';
+  return value.slice(0, TWITTER_CHAR_LIMIT);
 }
 
 // Show status message

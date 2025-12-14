@@ -229,51 +229,11 @@ async function handleGenerateReply(request, sendResponse) {
     
     // Build the prompt
     const prompt = buildPrompt(tweetContent, settings);
-    
-    // Call appropriate API
-    let reply;
-    let selectedModel;
-    
-    switch (provider) {
-      case 'gemini':
-        selectedModel = 'gemini-2.5-flash';
-        console.log(`🤖 [BACKGROUND] Calling Gemini API with model: ${selectedModel}`);
-        reply = await callGeminiAPI(prompt, apiKey);
-        break;
-      case 'openrouter':
-        selectedModel = settings?.openRouterModel === 'custom' ? 
-          settings?.openRouterCustomModelName : 
-          settings?.openRouterModel;
-        console.log(`🤖 [BACKGROUND] Calling OpenRouter API with model: ${selectedModel}`);
-        reply = await callOpenRouterAPI(prompt, apiKey, selectedModel);
-        break;
-      case 'openai':
-        selectedModel = settings?.openaiModel === 'custom' ? 
-          settings?.openaiCustomModelName : 
-          (settings?.openaiModel || 'gpt-4o');
-        console.log(`🤖 [BACKGROUND] Calling OpenAI API with model: ${selectedModel}`);
-        reply = await callOpenAIAPI(prompt, apiKey, selectedModel);
-        break;
-      case 'deepseek':
-        selectedModel = settings?.deepseekModel || 'deepseek-chat';
-        console.log(`🤖 [BACKGROUND] Calling DeepSeek API with model: ${selectedModel}`);
-        reply = await callDeepSeekAPI(prompt, apiKey, selectedModel);
-        break;
-      case 'claude':
-        selectedModel = settings?.claudeModel === 'custom' ? 
-          settings?.claudeCustomModelName : 
-          (settings?.claudeModel || 'claude-opus-4-20250514');
-        console.log(`🤖 [BACKGROUND] Calling Claude API with model: ${selectedModel}`);
-        reply = await callClaudeAPI(prompt, apiKey, selectedModel);
-        break;
-      default:
-        throw new Error(`Unsupported provider: ${provider}`);
-    }
-    
-    console.log(`✅ [BACKGROUND] Successfully generated reply using ${provider}/${selectedModel}`);
-    
-    // Validate and process reply
-    const processedReply = validateAndProcessReply(reply, settings);
+    const { reply: processedReply, model: selectedModel } =
+      await generateReplyWithWordRange(provider, prompt, settings, apiKey);
+
+    console.log(`[BACKGROUND] Successfully generated reply using ${provider}/${selectedModel}`);
+
     
     sendResponse({ success: true, reply: processedReply });
   } catch (error) {
@@ -360,51 +320,11 @@ async function handleGenerateTweet(request, sendResponse) {
     }
     
     console.log(`🔧 [BACKGROUND] Tweet generation using provider: ${provider}`);
-    
-    // Call appropriate API
-    let tweet;
-    let selectedModel;
-    
-    switch (provider) {
-      case 'gemini':
-        selectedModel = 'gemini-2.5-flash';
-        console.log(`🤖 [BACKGROUND] Calling Gemini API for tweet with model: ${selectedModel}`);
-        tweet = await callGeminiAPI(prompt, apiKey);
-        break;
-      case 'openrouter':
-        selectedModel = settings?.openRouterModel === 'custom' ? 
-          settings?.openRouterCustomModelName : 
-          settings?.openRouterModel;
-        console.log(`🤖 [BACKGROUND] Calling OpenRouter API for tweet with model: ${selectedModel}`);
-        tweet = await callOpenRouterAPI(prompt, apiKey, selectedModel);
-        break;
-      case 'openai':
-        selectedModel = settings?.openaiModel === 'custom' ? 
-          settings?.openaiCustomModelName : 
-          (settings?.openaiModel || 'gpt-4o');
-        console.log(`🤖 [BACKGROUND] Calling OpenAI API for tweet with model: ${selectedModel}`);
-        tweet = await callOpenAIAPI(prompt, apiKey, selectedModel);
-        break;
-      case 'deepseek':
-        selectedModel = settings?.deepseekModel || 'deepseek-chat';
-        console.log(`🤖 [BACKGROUND] Calling DeepSeek API for tweet with model: ${selectedModel}`);
-        tweet = await callDeepSeekAPI(prompt, apiKey, selectedModel);
-        break;
-      case 'claude':
-        selectedModel = settings?.claudeModel === 'custom' ? 
-          settings?.claudeCustomModelName : 
-          (settings?.claudeModel || 'claude-opus-4-20250514');
-        console.log(`🤖 [BACKGROUND] Calling Claude API for tweet with model: ${selectedModel}`);
-        tweet = await callClaudeAPI(prompt, apiKey, selectedModel);
-        break;
-      default:
-        throw new Error(`Unsupported provider: ${provider}`);
-    }
-    
-    console.log(`✅ [BACKGROUND] Successfully generated tweet using ${provider}/${selectedModel}`);
-    
-    // Validate and process tweet
-    const processedTweet = validateAndProcessReply(tweet, settings);
+    const { reply: processedTweet, model: selectedModel } =
+      await generateReplyWithWordRange(provider, prompt, settings, apiKey);
+
+    console.log(`[BACKGROUND] Successfully generated tweet using ${provider}/${selectedModel}`);
+
     
     sendResponse({ success: true, tweet: processedTweet });
   } catch (error) {
@@ -416,9 +336,127 @@ async function handleGenerateTweet(request, sendResponse) {
   }
 }
 
+async function generateReplyWithWordRange(provider, basePrompt, settings, apiKey, options = {}) {
+  const minWords = settings?.minWords || DEFAULT_SETTINGS.minWords;
+  const maxWords = settings?.maxWords || DEFAULT_SETTINGS.maxWords;
+  const maxAttempts = options.maxAttempts || 3;
+  let attemptPrompt = basePrompt;
+  let lastProcessedReply = '';
+  let lastModel = '';
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { reply, model } = await callProviderAPI(provider, attemptPrompt, settings, apiKey);
+    lastModel = model;
+    const processedReply = validateAndProcessReply(reply, settings);
+    const wordCount = countWords(processedReply);
+    
+    if (wordCount >= minWords) {
+      return { reply: processedReply, model };
+    }
+    
+    console.warn(`[BACKGROUND] Reply attempt ${attempt} generated ${wordCount} words (min ${minWords}). Retrying...`);
+    lastProcessedReply = processedReply;
+    
+    if (attempt < maxAttempts) {
+      attemptPrompt = addLengthEnforcementPrompt(basePrompt, minWords, maxWords, wordCount);
+    }
+  }
+  
+  const paddedReply = padReplyToMinWords(lastProcessedReply, minWords);
+  const limitedReply = enforceWordLimit(paddedReply, maxWords);
+  const cappedReply = enforceCharacterLimit(limitedReply);
+  return { reply: cappedReply, model: lastModel };
+}
+
+async function callProviderAPI(provider, prompt, settings, apiKey) {
+  let selectedModel;
+  let reply;
+  
+  switch (provider) {
+    case 'gemini':
+      selectedModel = 'gemini-2.5-flash';
+      console.log(`dY- [BACKGROUND] Calling Gemini API with model: ${selectedModel}`);
+      reply = await callGeminiAPI(prompt, apiKey);
+      break;
+    case 'openrouter':
+      selectedModel = settings?.openRouterModel === 'custom' ? 
+        settings?.openRouterCustomModelName : 
+        settings?.openRouterModel;
+      console.log(`dY- [BACKGROUND] Calling OpenRouter API with model: ${selectedModel}`);
+      reply = await callOpenRouterAPI(prompt, apiKey, selectedModel);
+      break;
+    case 'openai':
+      selectedModel = settings?.openaiModel === 'custom' ? 
+        settings?.openaiCustomModelName : 
+        (settings?.openaiModel || 'gpt-4o');
+      console.log(`dY- [BACKGROUND] Calling OpenAI API with model: ${selectedModel}`);
+      reply = await callOpenAIAPI(prompt, apiKey, selectedModel);
+      break;
+    case 'deepseek':
+      selectedModel = settings?.deepseekModel || 'deepseek-chat';
+      console.log(`dY- [BACKGROUND] Calling DeepSeek API with model: ${selectedModel}`);
+      reply = await callDeepSeekAPI(prompt, apiKey, selectedModel);
+      break;
+    case 'claude':
+      selectedModel = settings?.claudeModel === 'custom' ? 
+        settings?.claudeCustomModelName : 
+        (settings?.claudeModel || 'claude-opus-4-20250514');
+      console.log(`dY- [BACKGROUND] Calling Claude API with model: ${selectedModel}`);
+      reply = await callClaudeAPI(prompt, apiKey, selectedModel);
+      break;
+    default:
+      throw new Error(`Unsupported provider: ${provider}`);
+  }
+  
+  return { reply, model: selectedModel };
+}
+
+function addLengthEnforcementPrompt(basePrompt, minWords, maxWords, previousWordCount) {
+  return `${basePrompt}
+
+CRITICAL LENGTH REQUIREMENT:
+- Response MUST be between ${minWords} and ${maxWords} words
+- The previous attempt had ${previousWordCount} words and was rejected
+Generate a fresh response that satisfies this word count.`;
+}
+
+function countWords(text = '') {
+  if (!text || !text.trim()) {
+    return 0;
+  }
+  return text.trim().split(/\\s+/).filter(Boolean).length;
+}
+
+function padReplyToMinWords(reply, minWords) {
+  let content = (reply || '').trim();
+  let words = content ? content.split(/\\s+/) : [];
+  
+  if (words.length >= minWords) {
+    return content;
+  }
+  
+  const fillerPhrases = [
+    'appreciate you sharing this perspective',
+    'definitely gives me more to think about',
+    'curious to see how this plays out for us',
+    'thanks for flagging this in the thread'
+  ];
+  let fillerIndex = 0;
+  
+  while (words.length < minWords) {
+    const fillerWords = fillerPhrases[fillerIndex % fillerPhrases.length].split(/\\s+/);
+    words = words.concat(fillerWords);
+    fillerIndex++;
+  }
+  
+  return words.join(' ').replace(/\\s+/g, ' ').trim();
+}
+
 // Build the prompt for Gemini with enhanced context
 function buildPrompt(tweetContent, settings) {
-  const wordRange = `${settings.minWords || 5} to ${settings.maxWords || 16}`;
+  const minWords = settings.minWords || DEFAULT_SETTINGS.minWords;
+  const maxWords = settings.maxWords || DEFAULT_SETTINGS.maxWords;
+  const wordRange = `${minWords} to ${maxWords}`;
   const language = tweetContent.language || 'en';
   const tweetType = tweetContent.type || 'personal';
   
@@ -434,7 +472,7 @@ CONTEXT:
 
 REQUIREMENTS:
 1. Reply in the same language as the tweet
-2. Length: ${wordRange} words (vary randomly within this range)
+2. Length: ${wordRange} words (hard requirement - under ${minWords} words is invalid)
 3. Tone: Match the tweet's emotional tone and formality level
 4. Human writing patterns:
    - Sometimes start with lowercase (30% chance)
@@ -442,6 +480,10 @@ REQUIREMENTS:
    - Common abbreviations when appropriate (ur, ppl, thx, bc)
    - Contractions (you're, don't, can't, won't)
 ${settings.includeEmoji ? '5. Include 1-2 contextually relevant emojis naturally placed' : '5. NO emojis'}
+
+LENGTH ENFORCEMENT:
+- Minimum: ${minWords} words (responses shorter than this are rejected)
+- Maximum: ${maxWords} words (keep it tight and conversational)
 
 CRITICAL RULES:
 - Write as a regular human Twitter user, not an AI
@@ -803,6 +845,9 @@ function validateAndProcessReply(reply, settings) {
   // Final cleanup - remove multiple spaces
   processedReply = processedReply.replace(/\s+/g, ' ').trim();
   
+  const maxWords = settings?.maxWords || DEFAULT_SETTINGS.maxWords;
+  processedReply = enforceWordLimit(processedReply, maxWords);
+  
   // Ensure Twitter character limit
   processedReply = enforceCharacterLimit(processedReply);
   
@@ -883,6 +928,22 @@ function addHumanVariations(reply) {
 }
 
 // Enforce Twitter character limit
+function enforceWordLimit(text, maxWords) {
+  if (!text) return '';
+  const trimmedText = text.trim();
+  if (!maxWords || maxWords <= 0) {
+    return trimmedText;
+  }
+  
+  const words = trimmedText.split(/\s+/);
+  if (words.length <= maxWords) {
+    return trimmedText;
+  }
+  
+  const limited = words.slice(0, maxWords).join(' ');
+  return limited.trim();
+}
+
 function enforceCharacterLimit(text) {
   const limit = LIMITS.TWITTER_CHAR_LIMIT;
   
