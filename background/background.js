@@ -443,11 +443,22 @@ function buildPrompt(tweetContent, settings) {
   const wordRange = `${minWords} to ${maxWords}`;
   const language = tweetContent.language || 'en';
   const tweetType = tweetContent.type || 'personal';
+  const previousReplies = Array.isArray(tweetContent.previousReplies)
+    ? tweetContent.previousReplies.filter(Boolean)
+    : [];
+  const previousRepliesSection = previousReplies.length
+    ? `
+PREVIOUS AI REPLIES (never copy or lightly rephrase these):
+${previousReplies.map((reply, index) => `${index + 1}. ${reply}`).join('\n')}
+`
+    : '';
   
   const prompt = `You are a real Twitter user responding naturally to tweets. 
 
 ORIGINAL TWEET:
 "${tweetContent.text}"
+
+${previousRepliesSection}
 
 CONTEXT:
 - Author: ${tweetContent.author || 'Unknown'}
@@ -463,7 +474,8 @@ REQUIREMENTS:
    - Natural punctuation variations (... or !! or ??)
    - Common abbreviations when appropriate (ur, ppl, thx, bc)
    - Contractions (you're, don't, can't, won't)
-${settings.includeEmoji ? '5. Include 1-2 contextually relevant emojis naturally placed' : '5. NO emojis'}
+5. ${settings.includeEmoji ? 'Include 1-2 contextually relevant emojis naturally placed' : 'NO emojis'}
+${previousReplies.length ? '6. Avoid repeating the structure, narrative, or punchlines from the previously generated replies listed above.' : ''}
 
 LENGTH ENFORCEMENT:
 - Minimum: ${minWords} words (responses shorter than this are rejected)

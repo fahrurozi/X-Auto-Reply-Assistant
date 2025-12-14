@@ -115,7 +115,9 @@
         eventListeners: new Map(),
         timers: new Set(),
         isCleanedUp: false,
-        isAiGenerating: false
+        isAiGenerating: false,
+        replyHistory: new Map(),
+        activeReplyContext: null
     };
     
     // Helper function to get API key for provider
@@ -439,7 +441,7 @@
     
     // Handle auto reply button click
     async function handleAutoReplyClick(event, replyButton) {
-        const button = event.target;
+        const button = event.currentTarget || event.target;
         
         try {
             // Check if already generating
@@ -473,6 +475,15 @@
             if (!tweetContent) {
                 throw new Error(ERROR_MESSAGES.TWEET_NOT_FOUND);
             }
+            const conversationKey = createConversationKey(tweetContent);
+            const history = getReplyHistory(conversationKey);
+            const promptHistory = [...history];
+            tweetContent.conversationKey = conversationKey;
+            STATE.activeReplyContext = {
+                autoReplyButton: button,
+                replyButton,
+                conversationKey
+            };
             
             // Fetch fresh settings to ensure provider switching works
             await loadSettings();
@@ -481,19 +492,36 @@
             showToast('Generating your reply...', 'info');
             logCurrentSettingsForDebug(settings);
             
-            const response = await safeRuntimeSendMessage({
-                type: 'generateReply',
-                tweetContent: tweetContent,
-                settings: settings
-            });
-            
-            if (response.error) {
-                throw new Error(response.error);
-            }
-            
-            const replyText = response.reply;
-            if (!replyText) {
-                throw new Error(ERROR_MESSAGES.GENERATION_FAILED);
+            const maxVariationAttempts = 3;
+            let replyText = '';
+            for (let attempt = 1; attempt <= maxVariationAttempts; attempt++) {
+                tweetContent.previousReplies = promptHistory;
+                const response = await safeRuntimeSendMessage({
+                    type: 'generateReply',
+                    tweetContent: tweetContent,
+                    settings: settings
+                });
+                
+                if (response.error) {
+                    throw new Error(response.error);
+                }
+                
+                replyText = response.reply;
+                if (!replyText) {
+                    throw new Error(ERROR_MESSAGES.GENERATION_FAILED);
+                }
+                
+                if (!isDuplicateReply(promptHistory, replyText)) {
+                    break;
+                }
+                
+                promptHistory.push(replyText);
+                
+                if (attempt === maxVariationAttempts) {
+                    throw new Error('Could not generate a fresh reply. Please try again.');
+                }
+                
+                showToast('Reply sounded the same, trying a new angle...', 'warning');
             }
             
             // Wait a bit more for interface to be ready
@@ -501,6 +529,8 @@
             
             // Insert the reply using improved method
             await insertReplyWithImprovedMethod(replyText);
+            recordReplyHistory(conversationKey, replyText);
+            showControlButtons(STATE.activeReplyContext);
             
             updateButtonState(button, 'success');
             showToast('Reply generated successfully!', 'success');
@@ -534,27 +564,14 @@
         const tweetTextElement = article.querySelector(SELECTORS.tweetText);
         if (!tweetTextElement) return null;
         
-        // Extract text nodes recursively to get clean text
-        function getTextNodes(element) {
-            let textNodes = [];
-            for (let node = element.firstChild; node; node = node.nextSibling) {
-                if (node.nodeType === Node.TEXT_NODE) {
-                    textNodes.push(node);
-                } else {
-                    textNodes = textNodes.concat(getTextNodes(node));
-                }
-            }
-            return textNodes;
-        }
-        
-        const textNodes = getTextNodes(tweetTextElement);
-        const text = textNodes.map(node => node.data).join(' ').trim();
+        const text = extractTweetText(tweetTextElement);
+        if (!text) return null;
         const detectedLanguage = determineTweetLanguage(article, tweetTextElement, text);
         
-        // Return object format expected by background script
         return {
             text: text,
             author: extractAuthorInfo(article),
+            authorHandle: extractAuthorHandle(article),
             language: detectedLanguage,
             type: detectTweetType(text),
             hasMedia: article.querySelector('img, video') !== null,
@@ -564,8 +581,25 @@
             mentions: extractMentions(text),
             hashtags: extractHashtags(text),
             engagement: extractEngagement(article),
-            timestamp: extractTimestamp(article)
+            timestamp: extractTimestamp(article),
+            tweetId: extractTweetId(article)
         };
+    }
+    
+    function extractTweetText(tweetTextElement) {
+        if (!tweetTextElement) return '';
+        const walker = document.createTreeWalker(
+            tweetTextElement,
+            NodeFilter.SHOW_TEXT,
+            null,
+            false
+        );
+        let text = '';
+        let node;
+        while ((node = walker.nextNode())) {
+            text += `${node.textContent} `;
+        }
+        return text.replace(/\s+/g, ' ').trim();
     }
     
     // Helper function to extract author information
@@ -577,7 +611,74 @@
             return 'Unknown';
         }
     }
+
+    function extractAuthorHandle(article) {
+        try {
+            const authorLink = article.querySelector('[data-testid="User-Name"] a[href^="/"]');
+            if (!authorLink) return null;
+            const href = authorLink.getAttribute('href') || '';
+            const handle = href.replace('/', '').trim();
+            return handle ? `@${handle}` : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function extractTweetId(article) {
+        try {
+            const statusLink = article.querySelector('a[href*="/status/"]');
+            if (!statusLink || !statusLink.href) return null;
+            const match = statusLink.href.match(/\/status\/(\d+)/);
+            return match ? match[1] : null;
+        } catch (error) {
+            return null;
+        }
+    }
     
+    function createConversationKey(tweetContent) {
+        if (!tweetContent) return null;
+        if (tweetContent.tweetId) return tweetContent.tweetId;
+        const source = `${tweetContent.author || 'unknown'}_${tweetContent.timestamp || ''}_${tweetContent.text || ''}`;
+        return `tweet_${hashString(source)}`;
+    }
+
+    function hashString(value) {
+        if (!value) return 0;
+        let hash = 0;
+        for (let i = 0; i < value.length; i++) {
+            hash = (hash << 5) - hash + value.charCodeAt(i);
+            hash |= 0;
+        }
+        return Math.abs(hash);
+    }
+
+    function getReplyHistory(conversationKey) {
+        if (!conversationKey) return [];
+        return STATE.replyHistory.get(conversationKey)
+            ? [...STATE.replyHistory.get(conversationKey)]
+            : [];
+    }
+
+    function recordReplyHistory(conversationKey, reply) {
+        if (!conversationKey || !reply) return;
+        const normalized = reply.trim();
+        if (!normalized) return;
+        const existing = STATE.replyHistory.get(conversationKey) || [];
+        if (!existing.some(r => r.toLowerCase() === normalized.toLowerCase())) {
+            existing.push(normalized);
+            if (existing.length > 5) {
+                existing.shift();
+            }
+            STATE.replyHistory.set(conversationKey, existing);
+        }
+    }
+
+    function isDuplicateReply(history, candidate) {
+        if (!candidate) return false;
+        const normalized = candidate.trim().toLowerCase();
+        return history.some(entry => entry.trim().toLowerCase() === normalized);
+    }
+
     function normalizeLanguageCode(value) {
         if (!value || typeof value !== 'string') return '';
         return value.toLowerCase().split('-')[0];
@@ -812,9 +913,6 @@
             }
             return true;
         }
-        
-        // Show control buttons after successful text insertion
-        showControlButtons();
         
         return success;
     }
@@ -1139,11 +1237,6 @@ async function insertReplyWithTyping(replyText) {
         
         // Use improved text insertion method and return success status
         const success = await pasteInTwitterInput(finalText, textarea);
-        
-        if (success) {
-            // Show control buttons after successful text insertion
-            showControlButtons();
-        }
         
     return success;
 }
@@ -1506,7 +1599,8 @@ async function directTextInsertion(textarea, finalText) {
     }
     
     // Show control buttons after text insertion
-    function showControlButtons() {
+    function showControlButtons(replyContext = STATE.activeReplyContext) {
+        if (!replyContext) return;
         const textarea = findReplyTextarea();
         if (!textarea) return;
         
@@ -1554,10 +1648,11 @@ async function directTextInsertion(textarea, finalText) {
         
         newReplyBtn.onclick = async () => {
             controls.remove();
-            // Find and click the auto reply button again
-            const autoReplyBtn = document.querySelector(`.${CSS_CLASSES.autoReplyBtn}`);
-            if (autoReplyBtn) {
+            const autoReplyBtn = replyContext.autoReplyButton;
+            if (autoReplyBtn && typeof autoReplyBtn.click === 'function') {
                 autoReplyBtn.click();
+            } else {
+                showToast('Could not find the Auto Reply button for this thread.', 'error');
             }
         };
         
@@ -2584,6 +2679,10 @@ Output ONLY the tweet text, no quotes.`;
             // Clear button references
             STATE.injectedButtons.clear();
             STATE.activeAiButton = null;
+            if (STATE.replyHistory && typeof STATE.replyHistory.clear === 'function') {
+                STATE.replyHistory.clear();
+            }
+            STATE.activeReplyContext = null;
             
             // Mark as cleaned up
             STATE.isCleanedUp = true;
