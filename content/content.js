@@ -459,6 +459,7 @@
             }
             
             STATE.isGenerating = true;
+            setAiButtonLoading(true);
             updateButtonState(button, 'loading');
             
             // First click the reply button to open reply interface
@@ -521,6 +522,7 @@
             
         } finally {
             STATE.isGenerating = false;
+            setAiButtonLoading(false);
         }
     }
     
