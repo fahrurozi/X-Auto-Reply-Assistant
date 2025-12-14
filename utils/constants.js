@@ -43,8 +43,8 @@ const AI_PROVIDERS = {
   GEMINI: {
     id: 'gemini',
     name: 'Google Gemini',
-    endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
-    model: 'gemini-2.5-flash',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent',
+    model: 'gemma-3-27b-it',
     generationConfig: {
       temperature: 0.8,
       topK: 40,

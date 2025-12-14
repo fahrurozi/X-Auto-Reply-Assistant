@@ -60,11 +60,18 @@
         toast: 'toast'
     };
 
+    const AUTO_REPLY_STYLE_ID = 'x-auto-reply-style';
+
     const BUTTON_STATES = {
         idle: '✨ Auto Reply',
-        loading: '⏳ Generating...',
+        loading: '<span class="auto-reply-spinner" aria-hidden="true"></span><span>⏳ Generating...</span>',
         error: '❌ Retry',
         success: '✅ Ready'
+    };
+
+    const AI_BUTTON_LABELS = {
+        idle: '✨ Write with AI',
+        loading: '<span class="auto-reply-spinner" aria-hidden="true"></span><span>⏳ Generating...</span>'
     };
 
     const ERROR_MESSAGES = {
@@ -80,6 +87,14 @@
         normal: { base: 50, variance: 30 },
         fast: { base: 30, variance: 20 }
     };
+
+    const SENSITIVE_SETTING_KEYS = [
+        'geminiKey',
+        'openRouterKey',
+        'openaiKey',
+        'deepseekKey',
+        'claudeKey'
+    ];
 
     const TWEET_TYPES = {
         NEWS: 'news',
@@ -99,7 +114,8 @@
         injectedButtons: new Set(),
         eventListeners: new Map(),
         timers: new Set(),
-        isCleanedUp: false
+        isCleanedUp: false,
+        isAiGenerating: false
     };
     
     // Helper function to get API key for provider
@@ -273,7 +289,74 @@
             }
         });
     }
-    
+
+    function ensureAutoReplyStyles() {
+        if (document.getElementById(AUTO_REPLY_STYLE_ID)) {
+            return;
+        }
+        const style = document.createElement('style');
+        style.id = AUTO_REPLY_STYLE_ID;
+        style.textContent = `
+            .auto-reply-spinner {
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                border: 2px solid rgba(29, 155, 240, 0.25);
+                border-top-color: rgb(29, 155, 240);
+                animation: auto-reply-spin 0.8s linear infinite;
+                display: inline-block;
+                margin-right: 6px;
+                vertical-align: middle;
+            }
+            .${CSS_CLASSES.autoReplyBtn}.loading {
+                opacity: 0.85;
+                pointer-events: none;
+            }
+            .ai-tweet-btn.loading {
+                opacity: 0.85;
+                pointer-events: none;
+            }
+            @keyframes auto-reply-spin {
+                to { transform: rotate(360deg); }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function applyAiButtonState(button, isLoading) {
+        if (!button || !button.isConnected) return;
+        if (isLoading) {
+            button.classList.add('loading');
+            button.disabled = true;
+            button.innerHTML = AI_BUTTON_LABELS.loading;
+            button.setAttribute('aria-busy', 'true');
+        } else {
+            button.classList.remove('loading');
+            button.disabled = false;
+            button.innerHTML = AI_BUTTON_LABELS.idle;
+            button.setAttribute('aria-busy', 'false');
+        }
+    }
+
+    function setAiButtonLoading(isLoading) {
+        STATE.isAiGenerating = isLoading;
+        const buttons = document.querySelectorAll('.ai-tweet-btn');
+        buttons.forEach(button => applyAiButtonState(button, isLoading));
+    }
+
+    function logCurrentSettingsForDebug(settings) {
+        if (!settings || typeof settings !== 'object') {
+            return;
+        }
+        const safeSettings = { ...settings };
+        SENSITIVE_SETTING_KEYS.forEach(key => {
+            if (key in safeSettings) {
+                safeSettings[key] = safeSettings[key] ? '***' : '';
+            }
+        });
+        console.log('[X Auto Reply] Current generation settings:', safeSettings);
+    }
+
     // Inject Auto Reply button
     function injectAutoReplyButton(replyButton) {
         try {
@@ -288,6 +371,8 @@
                 console.log('[X Auto Reply] Button already injected for this reply button');
                 return;
             }
+
+            ensureAutoReplyStyles();
             
             // Mark as injected
             replyButton.dataset.autoReplyInjected = 'true';
@@ -393,6 +478,7 @@
             
             // Generate reply
             showToast('Generating your reply...', 'info');
+            logCurrentSettingsForDebug(settings);
             
             const response = await safeRuntimeSendMessage({
                 type: 'generateReply',
@@ -461,12 +547,13 @@
         
         const textNodes = getTextNodes(tweetTextElement);
         const text = textNodes.map(node => node.data).join(' ').trim();
+        const detectedLanguage = determineTweetLanguage(article, tweetTextElement, text);
         
         // Return object format expected by background script
         return {
             text: text,
             author: extractAuthorInfo(article),
-            language: detectLanguage(text),
+            language: detectedLanguage,
             type: detectTweetType(text),
             hasMedia: article.querySelector('img, video') !== null,
             isThread: article.querySelector('[data-testid="tweet"] [data-testid="tweet"]') !== null,
@@ -489,6 +576,39 @@
         }
     }
     
+    function normalizeLanguageCode(value) {
+        if (!value || typeof value !== 'string') return '';
+        return value.toLowerCase().split('-')[0];
+    }
+
+    function determineTweetLanguage(article, tweetTextElement, fallbackText) {
+        const candidates = [];
+        const attr = tweetTextElement?.getAttribute?.('lang');
+        if (attr) candidates.push(attr);
+        if (tweetTextElement && typeof tweetTextElement.querySelectorAll === 'function') {
+            tweetTextElement.querySelectorAll('[lang]').forEach(el => {
+                const nestedAttr = el.getAttribute('lang');
+                if (nestedAttr) candidates.push(nestedAttr);
+            });
+        }
+        if (article) {
+            const articleAttr = article.getAttribute?.('lang');
+            if (articleAttr) candidates.push(articleAttr);
+            const articleLangEl = article.querySelector?.('[lang]');
+            if (articleLangEl) {
+                const val = articleLangEl.getAttribute('lang');
+                if (val) candidates.push(val);
+            }
+        }
+        for (const candidate of candidates) {
+            const normalized = normalizeLanguageCode(candidate);
+            if (normalized) {
+                return normalized;
+            }
+        }
+        return detectLanguage(fallbackText);
+    }
+
     // Helper function to detect language (simple detection)
     function detectLanguage(text) {
         // Simple language detection based on common patterns
@@ -1437,7 +1557,8 @@
     function updateButtonState(button, state) {
         if (!button || !BUTTON_STATES[state]) return;
         button.className = `${CSS_CLASSES.autoReplyBtn} ${state}`;
-        button.textContent = BUTTON_STATES[state];
+        button.innerHTML = BUTTON_STATES[state];
+        button.setAttribute('aria-busy', state === 'loading' ? 'true' : 'false');
     }
     
     // Get random delay
@@ -1663,12 +1784,14 @@
         if (!tweetButton || tweetButton.dataset.aiButtonInjected) return;
         
         try {
+            ensureAutoReplyStyles();
             // Create the AI button with enhanced styling
             const aiButton = document.createElement('button');
+            aiButton.type = 'button';
             aiButton.setAttribute('role', 'button');
             aiButton.setAttribute('aria-label', 'Generate tweet with AI');
             aiButton.className = 'ai-tweet-btn';
-            aiButton.textContent = '✨ Write with AI';
+            aiButton.innerHTML = AI_BUTTON_LABELS.idle;
             
             // Add click event listener with proper cleanup tracking
             const clickHandler = (e) => {
@@ -1696,6 +1819,10 @@
                 STATE.injectedButtons.add(aiButton);
                 
                 console.log('[X Auto Reply] AI button injected successfully');
+            }
+
+            if (STATE.isAiGenerating) {
+                applyAiButtonState(aiButton, true);
             }
         } catch (error) {
             console.error('Failed to inject AI button:', error);
@@ -2207,6 +2334,7 @@
             // Disable generate button and show loading state
             generateBtn.disabled = true;
             generateBtn.textContent = '⏳ Generating...';
+            setAiButtonLoading(true);
             
             try {
                 // Fetch fresh settings to ensure provider switching works
@@ -2273,6 +2401,7 @@ Generate a natural, human-like tweet that feels authentic:`;
             } finally {
                 generateBtn.disabled = false;
                 generateBtn.textContent = '✨ Generate Tweet';
+                setAiButtonLoading(false);
             }
         });
         
@@ -2304,6 +2433,7 @@ Generate a natural, human-like tweet that feels authentic:`;
         
         generateBtn.disabled = true;
         generateBtn.textContent = '⏳ Generating...';
+        setAiButtonLoading(true);
         
         try {
             // Fetch fresh settings to ensure provider switching works
@@ -2355,6 +2485,7 @@ Output ONLY the tweet text, no quotes.`;
         } finally {
             generateBtn.disabled = false;
             generateBtn.textContent = '✨ Generate Tweet';
+            setAiButtonLoading(false);
         }
     }
     
@@ -2406,6 +2537,7 @@ Output ONLY the tweet text, no quotes.`;
             
             // Clear button references
             STATE.injectedButtons.clear();
+            STATE.activeAiButton = null;
             
             // Mark as cleaned up
             STATE.isCleanedUp = true;

@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const GEMINI_CONFIG = {
-  endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
+  endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent',
   generationConfig: {
     temperature: 0.8,
     topK: 40,
@@ -374,7 +374,7 @@ async function callProviderAPI(provider, prompt, settings, apiKey) {
   
   switch (provider) {
     case 'gemini':
-      selectedModel = 'gemini-2.5-flash';
+      selectedModel = 'gemma-3-27b-it';
       console.log(`dY- [BACKGROUND] Calling Gemini API with model: ${selectedModel}`);
       reply = await callGeminiAPI(prompt, apiKey);
       break;
@@ -428,28 +428,12 @@ function countWords(text = '') {
 }
 
 function padReplyToMinWords(reply, minWords) {
-  let content = (reply || '').trim();
-  let words = content ? content.split(/\\s+/) : [];
-  
-  if (words.length >= minWords) {
-    return content;
+  const content = (reply || '').trim();
+  if (!content) {
+    return '';
   }
-  
-  const fillerPhrases = [
-    'appreciate you sharing this perspective',
-    'definitely gives me more to think about',
-    'curious to see how this plays out for us',
-    'thanks for flagging this in the thread'
-  ];
-  let fillerIndex = 0;
-  
-  while (words.length < minWords) {
-    const fillerWords = fillerPhrases[fillerIndex % fillerPhrases.length].split(/\\s+/);
-    words = words.concat(fillerWords);
-    fillerIndex++;
-  }
-  
-  return words.join(' ').replace(/\\s+/g, ' ').trim();
+  // Keep AI output organic—just normalize whitespace without adding filler.
+  return content.replace(/\\s+/g, ' ');
 }
 
 // Build the prompt for Gemini with enhanced context

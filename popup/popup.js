@@ -400,7 +400,7 @@ function updateModelInfo(settings) {
   let modelName = '';
   switch (provider) {
     case 'gemini':
-      modelName = 'gemini-2.5-flash';
+      modelName = 'gemma-3-27b-it';
       break;
     case 'openrouter':
       modelName = settings.openRouterModel === 'custom' ? 
